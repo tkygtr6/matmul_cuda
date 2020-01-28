@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cuda_runtime.h>
 
+
 void printError(cudaError_t e, int l) {
     if (e != cudaSuccess) {
         printf("error: %s (code %d), line(%d)\n", cudaGetErrorString(e), e, l);
@@ -12,15 +13,30 @@ void printError(cudaError_t e, int l) {
 
 #define CheckError(f) printError((f), __LINE__)
 
+#define BX 32
+#define BY 32
+#define G_INDEX(b_x, b_y, t_x, t_y) (n * (BY * b_y + t_y) + (BX * b_x + t_x))
+#define S_INDEX(t_x, t_y) (blockDim.x * t_y + t_x)
+
 __global__
 void kernel(int n, int m, int k, melem_t *A, melem_t *B, melem_t *C) {
-    for (int i = 0; i < n; i++) {
-        for (int j= 0; j < m; j++) {
-            for (int l = 0; l <k; l++) {
-                C[i*m+j] += A[i*k+l] * B[l*m+j];
-            }
+    __shared__ melem_t A_[BX * BY];
+    __shared__ melem_t B_[BX * BY];
+    __shared__ melem_t C_[BX * BY];
+
+    C_[S_INDEX(threadIdx.x, threadIdx.y)] = 0;
+    for(int t = 0; t < n / BX; t++){
+        A_[S_INDEX(threadIdx.x, threadIdx.y)] = A[G_INDEX(t, blockIdx.y, threadIdx.x, threadIdx.y)];
+        B_[S_INDEX(threadIdx.x, threadIdx.y)] = B[G_INDEX(blockIdx.x, t, threadIdx.x, threadIdx.y)];
+        __syncthreads();
+
+        for(int s = 0; s < BX; s++){
+            C_[S_INDEX(threadIdx.x, threadIdx.y)] += A_[S_INDEX(s, threadIdx.y)] * B_[S_INDEX(threadIdx.x, s)];
         }
+        __syncthreads();
     }
+
+    C[G_INDEX(blockIdx.x, blockIdx.y, threadIdx.x, threadIdx.y)] = C_[S_INDEX(threadIdx.x, threadIdx.y)];
 }
 
 uint64_t cudaGemm(int n, int m, int k, melem_t *A, melem_t *B, melem_t *C) {
@@ -49,9 +65,12 @@ uint64_t cudaGemm(int n, int m, int k, melem_t *A, melem_t *B, melem_t *C) {
     CheckError(cudaEventCreate(&stop));
     cudaDeviceSynchronize();
 
+    dim3 grid(n / BX, n / BY);
+    dim3 block(BX, BY);
+
     // time measuring
     CheckError(cudaEventRecord(start, NULL));
-    kernel <<<1, 1>>> (n, m, k, devA, devB, devC);
+    kernel <<<grid, block>>> (n, m, k, devA, devB, devC);
     CheckError(cudaEventRecord(stop, NULL));
 
     // gemm end
