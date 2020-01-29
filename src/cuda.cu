@@ -15,33 +15,37 @@ void printError(cudaError_t e, int l) {
 
 #define BX 32
 #define BY 32
+#define UNX 4
 #define G_INDEX(b_x, b_y, t_x, t_y) ((n) * ((BY) * (b_y) + (t_y)) + ((BX) * (b_x) + (t_x)))
-#define S_INDEX_1(t_x, t_y) ((BX) * (t_y) + (t_x))
-#define S_INDEX_2(t_x, t_y) ((BX) * 2 * (t_y) + (t_x))
+#define S_INDEX(t_x, t_y, w_x) ((BX) * (t_y) * (w_x) + (t_x))
 
 __global__
 void kernel(int n, int m, int k, melem_t *A, melem_t *B, melem_t *C) {
     __shared__ melem_t A_[BX * BY];
-    __shared__ melem_t B_[(BX * 2) * BY];
-    __shared__ melem_t C_[(BX * 2) * BY];
+    __shared__ melem_t B_[(BX * UNX) * BY];
+    __shared__ melem_t C_[(BX * UNX) * BY];
 
-    C_[S_INDEX_2(threadIdx.x, threadIdx.y)] = 0;
-    C_[S_INDEX_2(threadIdx.x + BX, threadIdx.y)] = 0;
+    for(int i = 0; i < UNX; i++){
+        C_[S_INDEX(threadIdx.x + BX * i, threadIdx.y, UNX)] = 0;
+    }
     for(int t = 0; t < n / BX; t++){
-        A_[S_INDEX_1(threadIdx.x, threadIdx.y)] = A[G_INDEX(t, blockIdx.y, threadIdx.x, threadIdx.y)];
-        B_[S_INDEX_2(threadIdx.x, threadIdx.y)] = B[G_INDEX(blockIdx.x * 2, t, threadIdx.x, threadIdx.y)];
-        B_[S_INDEX_2(threadIdx.x + BX, threadIdx.y)] = B[G_INDEX(blockIdx.x * 2 + 1, t, threadIdx.x, threadIdx.y)];
+        A_[S_INDEX(threadIdx.x, threadIdx.y, 1)] = A[G_INDEX(t, blockIdx.y, threadIdx.x, threadIdx.y)];
+        for(int i = 0; i < UNX; i++){
+            B_[S_INDEX(threadIdx.x + BX * i, threadIdx.y, UNX)] = B[G_INDEX(blockIdx.x * UNX + i, t, threadIdx.x, threadIdx.y)];
+        }
         __syncthreads();
 
         for(int s = 0; s < BX; s++){
-            C_[S_INDEX_2(threadIdx.x, threadIdx.y)] += A_[S_INDEX_1(s, threadIdx.y)] * B_[S_INDEX_2(threadIdx.x, s)];
-            C_[S_INDEX_2(threadIdx.x + BX, threadIdx.y)] += A_[S_INDEX_1(s, threadIdx.y)] * B_[S_INDEX_2(threadIdx.x + BX, s)];
+            for(int i = 0; i < UNX; i++){
+                C_[S_INDEX(threadIdx.x + BX * i, threadIdx.y, UNX)] += A_[S_INDEX(s, threadIdx.y, 1)] * B_[S_INDEX(threadIdx.x + BX * i, s, UNX)];
+            }
         }
         __syncthreads();
     }
 
-    C[G_INDEX(blockIdx.x * 2, blockIdx.y, threadIdx.x, threadIdx.y)] = C_[S_INDEX_2(threadIdx.x, threadIdx.y)];
-    C[G_INDEX(blockIdx.x * 2 + 1, blockIdx.y, threadIdx.x, threadIdx.y)] = C_[S_INDEX_2(threadIdx.x + BX, threadIdx.y)];
+    for(int i = 0; i < UNX; i++){
+        C[G_INDEX(blockIdx.x * UNX + i, blockIdx.y, threadIdx.x, threadIdx.y)] = C_[S_INDEX(threadIdx.x + BX * i, threadIdx.y, UNX)];
+    }
 }
 
 uint64_t cudaGemm(int n, int m, int k, melem_t *A, melem_t *B, melem_t *C) {
@@ -70,7 +74,7 @@ uint64_t cudaGemm(int n, int m, int k, melem_t *A, melem_t *B, melem_t *C) {
     CheckError(cudaEventCreate(&stop));
     cudaDeviceSynchronize();
 
-    dim3 grid(n / (BX * 2), n / BY);
+    dim3 grid(n / (BX * UNX), n / BY);
     dim3 block(BX, BY);
 
     // time measuring
